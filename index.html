@@ -203,6 +203,7 @@ footer{text-align:center;padding:20px;color:var(--ink-dim);font-size:10px;letter
   .pagination{padding:12px 14px}
 }
 </style>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
 
@@ -883,8 +884,23 @@ footer{text-align:center;padding:20px;color:var(--ink-dim);font-size:10px;letter
   <div class="rem-wrap">
     <div class="form-card" style="max-width:900px">
       <div class="form-title">🔔 HATIRLATICILAR</div>
-      <div class="form-desc">Hatırlatma tarihi girilmiş kişiler burada listelenir; tarihi geçmiş veya bugüne ait olanlar üstte ve renkli gösterilir. Her kartta "📅 Takvime Ekle" ile o kişiye ait hatırlatmayı, 1 gün önce ve 30 dakika önce bildirim verecek şekilde takviminize indirebilirsiniz.</div>
-      <div style="margin:10px 0 16px"><button class="btn-primary" onclick="downloadAllRemindersICS()">📅 Tüm Hatırlatıcıları Takvime Aktar (.ics)</button></div>
+      <div class="form-desc">Hatırlatma tarihi girilmiş kişiler burada listelenir; tarihi geçmiş veya bugüne ait olanlar üstte ve renkli gösterilir.</div>
+
+      <div id="gcal-box" style="margin:10px 0 16px;padding:14px 16px;border-radius:12px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08)">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
+          <div>
+            <div style="font-weight:700;font-size:13px" id="gcal-status-title">🔗 Google Takvim: Bağlı değil</div>
+            <div class="hint" style="margin-top:4px" id="gcal-status-desc">Bağlanırsan, kaydettiğin her hatırlatıcı otomatik olarak Google Takvimine düşer ve telefonunda 1 gün önce + 30 dakika önce bildirim gelir. Hangi bilgisayardan girersen gir aynı şekilde çalışır.</div>
+          </div>
+          <button class="btn-primary" id="gcal-connect-btn" onclick="connectGoogleCalendar()">Google Takvim'e Bağlan</button>
+        </div>
+        <div style="margin-top:10px;display:none" id="gcal-bulk-row">
+          <button class="btn-sec" onclick="bulkSyncAllRemindersToGoogleCalendar()">🔄 Mevcut Tüm Hatırlatıcıları Şimdi Takvime Aktar</button>
+          <span class="hint" id="gcal-bulk-status" style="margin-left:8px"></span>
+        </div>
+      </div>
+
+      <div style="margin:10px 0 16px"><button class="btn-sec" onclick="downloadAllRemindersICS()">📅 Tüm Hatırlatıcıları .ics olarak indir (manuel/yedek)</button></div>
       <div id="reminders-list"></div>
     </div>
   </div>
@@ -2646,6 +2662,168 @@ footer{text-align:center;padding:20px;color:var(--ink-dim);font-size:10px;letter
 </script>
 
 <script>
+/* ═══════════ GOOGLE TAKVİM ENTEGRASYONU ═══════════ */
+const GCAL_CLIENT_ID = '50698099896-9lh2ld99b3fnt47j7qtacdenta7ttvp9.apps.googleusercontent.com';
+const GCAL_SCOPE = 'https://www.googleapis.com/auth/calendar.events';
+
+let gcalTokenClient = null;
+let gcalToken = null;        // {access_token, expiresAt}
+let gcalConnected = false;
+let gcalPendingAfterAuth = null;
+
+function initGoogleAuth(){
+  if(typeof google === 'undefined' || !google.accounts || !google.accounts.oauth2){
+    setTimeout(initGoogleAuth, 300);
+    return;
+  }
+  gcalTokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: GCAL_CLIENT_ID,
+    scope: GCAL_SCOPE,
+    callback: (resp) => {
+      if(resp && resp.access_token){
+        gcalToken = { access_token: resp.access_token, expiresAt: Date.now() + ((resp.expires_in||3500)*1000 - 60000) };
+        gcalConnected = true;
+        updateGcalStatusUI();
+        if(gcalPendingAfterAuth){ const cb = gcalPendingAfterAuth; gcalPendingAfterAuth = null; cb(); }
+      } else {
+        console.error('Google Takvim yetkilendirme hatası:', resp);
+        gcalPendingAfterAuth = null;
+        if(resp && resp.error !== 'interaction_required' && resp.error !== 'access_denied'){
+          alert('Google Takvim bağlantısında bir sorun oluştu. Lütfen tekrar deneyin.');
+        }
+        updateGcalStatusUI();
+      }
+    }
+  });
+}
+window.addEventListener('load', initGoogleAuth);
+
+function updateGcalStatusUI(){
+  const title = document.getElementById('gcal-status-title');
+  const desc = document.getElementById('gcal-status-desc');
+  const btn = document.getElementById('gcal-connect-btn');
+  const bulkRow = document.getElementById('gcal-bulk-row');
+  if(!title) return;
+  if(gcalConnected){
+    title.textContent = '✅ Google Takvim: Bağlı';
+    title.style.color = 'var(--good, #5fd39a)';
+    desc.textContent = 'Kaydettiğin her hatırlatıcı otomatik olarak Google Takvimine ekleniyor. Telefonunda 1 gün önce ve 30 dakika önce bildirim gelecek.';
+    btn.textContent = 'Yeniden Bağlan';
+    if(bulkRow) bulkRow.style.display = 'block';
+  } else {
+    title.textContent = '🔗 Google Takvim: Bağlı değil';
+    title.style.color = '';
+    btn.textContent = "Google Takvim'e Bağlan";
+    if(bulkRow) bulkRow.style.display = 'none';
+  }
+}
+
+function connectGoogleCalendar(){
+  if(!gcalTokenClient){ alert('Google bağlantısı henüz hazırlanıyor, birkaç saniye sonra tekrar deneyin.'); return; }
+  gcalPendingAfterAuth = null;
+  gcalTokenClient.requestAccessToken({ prompt: 'consent' });
+}
+
+function ensureGcalToken(cb){
+  if(!gcalTokenClient){ setTimeout(()=>ensureGcalToken(cb), 300); return; }
+  if(gcalToken && Date.now() < gcalToken.expiresAt){ cb(); return; }
+  gcalPendingAfterAuth = cb;
+  gcalTokenClient.requestAccessToken({ prompt: '' }); // önce sessiz dene
+}
+
+async function upsertGoogleCalendarEvent(row){
+  return new Promise((resolve)=>{
+    ensureGcalToken(async ()=>{
+      try{
+        if(!gcalToken){ resolve(false); return; }
+        const dateISO = row[11];
+        if(!dateISO){ resolve(false); return; }
+        const timeStr = (row[13] && row[13].trim()) ? row[13] : '09:00';
+        const [hh,mm] = timeStr.split(':').map(Number);
+        const start = new Date(dateISO+'T00:00:00'); start.setHours(hh||9, mm||0, 0, 0);
+        const end = new Date(start.getTime() + 30*60000);
+        const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Europe/Istanbul';
+        const eventBody = {
+          summary: '🔔 Hatırlatma: ' + row[1],
+          description: (row[12] || 'Not girilmemiş') + (row[2] ? ('\nTelefon: '+row[2]) : ''),
+          start: { dateTime: start.toISOString(), timeZone: tz },
+          end: { dateTime: end.toISOString(), timeZone: tz },
+          reminders: {
+            useDefault: false,
+            overrides: [
+              { method: 'popup', minutes: 24*60 },
+              { method: 'popup', minutes: 30 }
+            ]
+          }
+        };
+        const headers = { 'Authorization': 'Bearer '+gcalToken.access_token, 'Content-Type': 'application/json' };
+        let res;
+        if(row[14]){
+          res = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events/'+row[14], { method:'PATCH', headers, body: JSON.stringify(eventBody) });
+          if(res.status===404 || res.status===410){
+            res = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', { method:'POST', headers, body: JSON.stringify(eventBody) });
+          }
+        } else {
+          res = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', { method:'POST', headers, body: JSON.stringify(eventBody) });
+        }
+        if(res.ok){
+          const data = await res.json();
+          row[14] = data.id;
+          resolve(true);
+        } else {
+          console.error('Takvim etkinliği oluşturulamadı:', res.status, await res.text());
+          resolve(false);
+        }
+      }catch(e){ console.error(e); resolve(false); }
+    });
+  });
+}
+
+async function deleteGoogleCalendarEvent(eventId){
+  if(!eventId) return;
+  return new Promise((resolve)=>{
+    ensureGcalToken(async ()=>{
+      try{
+        if(!gcalToken){ resolve(); return; }
+        await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events/'+eventId, {
+          method:'DELETE',
+          headers:{ 'Authorization':'Bearer '+gcalToken.access_token }
+        });
+      }catch(e){ console.error(e); }
+      resolve();
+    });
+  });
+}
+
+async function syncRowToGoogleCalendarIfNeeded(row){
+  if(!gcalConnected) return;
+  if(row[11]){
+    const ok = await upsertGoogleCalendarEvent(row);
+    if(ok) persist();
+  } else if(row[14]){
+    await deleteGoogleCalendarEvent(row[14]);
+    row[14] = undefined;
+    persist();
+  }
+}
+
+async function bulkSyncAllRemindersToGoogleCalendar(){
+  if(!gcalConnected){ alert("Önce Google Takvim'e bağlanmalısın."); return; }
+  const statusEl = document.getElementById('gcal-bulk-status');
+  const rows = DATA.filter(r=>r[11]);
+  if(rows.length===0){ if(statusEl) statusEl.textContent = 'Aktarılacak hatırlatıcı yok.'; return; }
+  let done = 0;
+  for(const row of rows){
+    if(statusEl) statusEl.textContent = `Aktarılıyor... ${done+1}/${rows.length}`;
+    await upsertGoogleCalendarEvent(row);
+    done++;
+  }
+  persist();
+  if(statusEl) statusEl.textContent = `✅ ${done} hatırlatıcı Google Takvim'e aktarıldı.`;
+}
+</script>
+
+<script>
 const DEFAULT_DATA = [[1,"Abdullah Sencer Mys","05556978089","",2,"","","","",1],[2,"Abdullah Yeğin","+905426158632","",1,"","","","",2],[3,"Adem Bozacı","+905322650458","",2,"","","","",3],[4,"Adnan PEKACAR","+905458794045","",2,"","","","",4],[5,"Ahmet Ayşin","05458112773","",1,"","","","",5],[6,"Ahmet Boyu Metal Yapi","05334686984","",1,"","","","",6],[7,"Ahmet Demir","05318343508","",1,"","","","",7],[8,"Ahmet Demir Aysin","05456124275","",1,"","","","",8],[9,"Ahmet Fransa","+33769815174","",1,"","","","",9],[10,"Ahmet Nalbant Küp Evler","+905434144924","",3,"","","","",10],[11,"Ahmet Olcar Eng Kalite","+905061207220","",3,"","","","",11],[12,"Ahmet uysal","05439220619","",2,"","","","",12],[13,"Ahmet Yeğin Tırçı","+905541124004","",1,"","","","",13],[14,"Ahmet Yücealp","05052139557","",1,"","","","",14],[15,"Ali Osman Yılmaz","05365195933","",2,"","","","",15],[16,"Aliosman Uzuntaş","+905368491592","",1,"","","","",16],[17,"Angelina Tr Rusca Hocasi","+905546678124","",1,"","","","",17],[18,"Angelina Ukrayna","+380637140030","",1,"","","","",18],[19,"Anıl Bilgi İşlem","05345765769","",2,"","","","",19],[20,"Anıl Özen Mys Kalite","+905385835882","",3,"","","","",20],[21,"Arif Ünsoy Cti","+905312815156","",3,"","","","",21],[22,"Arzu Uyanik","+905334510015","",3,"","","","",22],[23,"Arın Özgür","5056968050","",1,"","","","",23],[24,"Arıtma Mesut","05526488242","",3,"","","","",24],[25,"Aslı Ünay Satın Alma","05364531642","",2,"","","","",25],[26,"Aydın Gülşen Sebile","+905319804705","",1,"","","","",26],[27,"Ayhan Taşeron Bilal","05321582494","",4,"","","","",27],[28,"Aykut Aksu Eng","","",2,"","","","",28],[29,"Aykut Keskin Mys","05387703424","",3,"","","","",29],[30,"Aytac Kayaoglu","05389594187","",2,"","","","",30],[31,"Ayşegül Kavacık","05444480103","",3,"","","","",31],[32,"Bahadir Turk","05542550815","",3,"","","","",32],[33,"Barış Alasoy Eng","05385760512","",2,"","","","",33],[34,"Begüm Demirezen","05324362378","",2,"","","","",34],[35,"Bekir Arabistan","+966546680541","",2,"","","","",35],[36,"Bekir Tr","","",2,"","","","",36],[37,"Berk Can Akın FTI","+905364517236","",2,"","","","",37],[38,"Berk FTI","+905382362068","",2,"","","","",38],[39,"Beyhan Arı Mys","05365156252","",3,"","","","",39],[40,"Beytullah Aksakal","+905434351864","",3,"","","","",40],[41,"Bilal Avea Celik","05079597173","",2,"","","","",41],[42,"Bircan","05554993774","",2,"","","","",42],[43,"Burak Yeltürk Fabrika","+905437896974","",2,"","","","",43],[44,"Burhan Avcı","05377197239","",2,"","","","",44],[45,"Bülent Akgül","05327829539","",2,"","","","",45],[46,"CanBerk Aygel Eng","05417420910","",2,"","","","",46],[47,"Caner Selçuk Kalite Kontrol","05063238366","",3,"","","","",47],[48,"Celil Çirik","+905416009740","",3,"","","","",48],[49,"Cem Bozat Boyacı","05434884126","",2,"","","","",49],[50,"Cem Gür Mys Fabrika","05327798043","",2,"","","","",50],[51,"Cemil Kuyukazan Belçika Mys","0032484113875","",1,"","","","",51],[52,"Cener Selçuk 2023","+905441074404","",3,"","","","",52],[53,"Cengiz yegin","05443654190","",1,"","","","",53],[54,"Cenk Kompozit Mys","05352256372","",2,"","","","",54],[55,"Cenk Ülgür","05322864188","",2,"","","","",55],[56,"Center Hüseyin Guven","","",3,"","","","",56],[57,"Cevat Salgam","05322048642","",2,"","","","",57],[58,"Cevher Kanber","+905325823823","",2,"","","","",58],[59,"Cihan Mekanik","05368407248","",2,"","","","",59],[63,"Cumali Eng Metal Yapı","+905374664555","",2,"","","","",60],[64,"Cumhur Coskun Moskova","+79255210212","",2,"","","","",61],[65,"Cumhur Çoşkun","+905388452603","",2,"","","","",62],[66,"Davut Topograf Mys","05443258495","",3,"","","","",63],[67,"Davut Tülübaş","+905326871060","",1,"","","","",64],[68,"Depo Alper","05326848167","",3,"","","","",65],[69,"Desen Hüseyin","+905444406042","",2,"","","","",66],[70,"Dinçer Subaşı","05334686982","",1,"","","","",67],[71,"Doğukan Kuru","","",3,"","","","",68],[72,"Doğukan Sarı FTI","+905417277029","",2,"","","","",69],[73,"Dr Sadettin Ür","+905075228478","",2,"","","","",70],[74,"Duran Mys","05422352228","",3,"","","","",71],[75,"Emir Kurt","+905546543439","",1,"","","","",72],[76,"Emre Arslan","+905063185130","",2,"","","","",73],[77,"Emre Beşoluk","05321652968","",2,"","","","",74],[78,"Emre Kaynarsu Tr","05336335353","",2,"","","","",75],[79,"Emre Lojistik","+905462201880","",2,"","","","",76],[80,"Emre safi Beso","05428953830","",2,"","","","",77],[81,"Emre Selvi","05442278310","",2,"","","","",78],[82,"Eng Ali Can","05422042459","",2,"","","","",79],[83,"Eng Burçin Kesim Statikçi","05338131643","",2,"","","","",80],[84,"Eng Bünyamin Aydoğdu","05343293830","",2,"","","","",81],[85,"Eng Erkan Beycan Statik Müdürü","05327649273","",2,"","","","",82],[86,"Eng Esra Eke","05342247038","",2,"","","","",83],[87,"Eng Metal Yapı Eren Gümüş","+905334258489","",2,"","","","",84],[88,"Eng Murat Hacıosmanoğlu","+905335235763","",2,"","","","",85],[89,"Eng Mustafa Kazancıoğlu","+905427448396","",2,"","","","",86],[90,"Eng Satın Alma Fahri","+905354279596","",2,"","","","",87],[91,"Eng Serdar Demir","","",3,"28.07.2026","Araştırıyor.","","",88],[92,"Engin Birk","05325751782","",2,"","","","",89],[93,"Engin Sav","05330367246","",1,"","","","",90],[94,"Erdener Esmer Mys","","",2,"","","","",91],[95,"Erdinç Bahadır","05369489812","",2,"","","","",92],[96,"Ergin Levha Kesimçi","05326927828","",1,"","","","",93],[97,"Erkan Alkan Tuzla","+905441718054","",3,"","","","",94],[98,"Erman Metal Yapı Ü.Proje","+905535013609","",2,"","","","",95],[99,"Ersin Aksakal Mys","05334547164","",4,"29.07.2026","Kayıt Yapıldı.","","",96],[100,"Ersin Koc","05309369746","",3,"","","","",97],[101,"Ersin Koç Tr","05330167858","",3,"29.07.2026","Olumlu","","",98],[102,"Etem Tosun Eng","+905559865328","",3,"","","","",99],[103,"Fahrettin Zer Çivata Huzur Dershane","+905553563500","",1,"","","","",100],[104,"Fatih Küçükçolak","+905433600483","",2,"","","","",101],[105,"Fatih Seher","+905536200608","",1,"","","","",102],[106,"Fedai Özden","05384452625","",3,"","","","",103],[107,"Ferhat Sahinkaya","+905436845617","",2,"","","","",104],[108,"Feride Kurtiş","+905443874316","",1,"","","","",105],[109,"Fevzi Yeğin 2024","+905446434961","",1,"","","","",106],[110,"Fiko Robot Mys","+905413510974","",2,"","","","",107],[111,"Fikret Hoca","+905456872090","",1,"","","","",108],[112,"Fortif Tuzla Sinan","","",2,"","","","",109],[113,"FTI Ayfer Dincel","05077548561","",2,"","","","",110],[114,"FTI Murat Gol","05366860515","",2,"","","","",111],[115,"Fti Serdar","05549091032","",2,"","","","",112],[116,"Ftı Celal Bahçivan","+905303646263","",1,"","","","",113],[117,"Fuda Mekanik","05322712234","",2,"","","","",114],[118,"Fırat Tınç Mys Kazım Bayöken","05375956467","",3,"","","","",115],[119,"Gafur Özkan Safi Yapı","05422241713","",2,"","","","",116],[120,"Gizem Merve Metin Koçmet Alusan","+905325043904","",1,"","","","",117],[121,"Gokhan Gok","0936590231","",3,"","","","",118],[122,"Gokhan İmalat Muduru","05545662891","",3,"","","","",119],[123,"Gokyay Karaman Tr","+905324683023","",2,"","","","",120],[124,"Gökhan Acun Metal Yapı","","",2,"","","","",121],[125,"Gökhan Rüzgar","05325166699","",2,"","","","",122],[126,"Gökhan Sincar Mys Kalite","05350748439","",1,"","","","",123],[127,"Gökhan Yıldız Mys","05438449360","",2,"","","","",124],[128,"Gökmen Mys","05065510083","",3,"","","","",125],[129,"Güner bas","05324410931","",1,"","","","",126],[130,"Güngör Azman Tr","+905334026353","+905334184609",2,"","","","",127],[131,"Gürel Sazli","05545393730","",2,"","","","",128],[132,"H.Taslak Kanada","+17787915561","",4,"29.07.2026","Düşünmüyor.","","",129],[133,"Hakan Tokgöz Mys","+905310107547","",4,"28.07.2026","Olumlu","","",130],[134,"Hakan Tr Gokcay","+905533091758","",4,"","","","",131],[135,"Hakan Vural Isg","+905348993464","",1,"","","","",132],[136,"Hakki Sirket Erol","05556444313","",3,"","","","",133],[137,"Halil İbrahim Eng","+905350577393","",2,"","","","",134],[138,"Halil yegin","+905449489804","",2,"","","","",135],[139,"Halil Özen","05327925452","",1,"","","","",136],[140,"Halit BAYÇÖL Mys Lojistik","+905433493825","",1,"","","","",137],[141,"Hamit Alusan","05418878313","",1,"","","","",138],[142,"Hamit Kayı","05358822974","",1,"","","","",139],[143,"Harun Birk","+905079307637","",3,"","","","",140],[144,"Harun Ersoy","05426249993","",2,"","","","",141],[145,"Harun Kütük 2020","05327018825","",2,"","","","",142],[146,"Harun Sirin","+905434463143","",2,"","","","",143],[147,"Hasan Acarlar","05324110155","",3,"","","","",144],[148,"Hasan celik Tr","+905545727115","",2,"","","","",145],[149,"Hasan Demir Mys","+905387160740","",2,"","","","",146],[150,"Hasan Evk","05324530355","",2,"","","","",147],[151,"Hasan Harmankaya","05379390358","",1,"","","","",148],[152,"Hasan Sargöz Mys Belçika","0032488387266","",3,"","","","",149],[153,"Hasan Taslak Metal Yapı","05323267817","",3,"","","","",150],[154,"HTK- Süleyman Solak","","",2,"","","","",151],[155,"Hüseyin Demirel","05425868723","",2,"","","","",152],[156,"Hüseyin İnox Kalite","+905385705795","",2,"","","","",153],[157,"Hüseyin Kurt","05423078729","",3,"","","","",154],[158,"Hüsnü AY","","",2,"","","","",155],[159,"Ibrahim ünlü","05556482182","",2,"","","","",156],[160,"Inox Davut Cemen","","",3,"","","","",157],[161,"Inox Murat Aktas","","",1,"","","","",158],[162,"Ismail Uludere","05324862612","",3,"","","","",159],[163,"IT ADAŞ MYS","05058780420","",1,"","","","",160],[164,"İbrahim Durmuş","+905077229945","",4,"","","","",161],[165,"İbrahim Solmaz","+905326136621","",1,"","","","",162],[166,"İbrahim Yucel","+905458072328","",1,"","","","",163],[167,"İbrahim Yücealp","+905063582911","",1,"","","","",164],[168,"İbrahim Çiçek","05354650672","",1,"","","","",165],[169,"İbrahim ÜNLÜ","","",2,"","","","",166],[170,"İbrahin Hamarat","05336546584","",1,"","","","",167],[171,"İlknur Ayaz Eng Metal Yapı","+905355418629","",1,"","","","",168],[172,"İlknur Işık","+905439063515","",1,"","","","",169],[173,"İlknur Karacasu","+905422520440","",1,"","","","",170],[174,"İlyas Alusan","05358157862","",1,"","","","",171],[175,"İlyas bulut","05056382586","",1,"","","","",172],[176,"İpek Karacasu Planlama","05444027757","",1,"","","","",173],[177,"İsmail Ergüner","05425633817","",1,"","","","",174],[178,"İsmail Findik","05052999383","",1,"","","","",175],[179,"İsmail Köse Özel Solmaz","+905422067982","",2,"","","","",176],[180,"İsmail Sistem Alüminyum","05358741223","05396624597",2,"","","","",177],[181,"İsmet Fbk","05414569356","",2,"","","","",178],[182,"Kaan Bedir MEG ÇELİK","+905387867168","",2,"","","","",179],[183,"Kader Sarıtaş","+905356831630","",2,"","","","",180],[184,"Kadir Alçı","05353544162","",2,"","","","",181],[185,"Kadir Öğüt","05325651667","",2,"","","","",182],[186,"Kadirm satın Alma","+905394004066","",2,"","","","",183],[187,"Kazim cidem","05365968969","",1,"","","","",184],[188,"Kazım Bayöken","+905322151694","",2,"","","","",185],[189,"Kerem İsim Osgb","05325732497","",2,"","","","",186],[190,"Kubilay Yazer Satın Alma","","",2,"","","","",187],[191,"Levent Kantar","05322638777","",3,"","","","",188],[192,"Levent Mobilyacı Ayhan Ceylan","05060655855","",2,"","","","",189],[193,"Mahir Arge","+905318384633","",2,"","","","",190],[194,"Mahmut","05416350478","",0,"","","","",191],[195,"Mahmut Yücealp Küçük","05063446549","05452737292",2,"","","","",192],[196,"Mehmet Ali Yeğin","05428335528","",1,"","","","",193],[197,"Mehmet Atalay","05372725022","",2,"","","","",194],[198,"Mehmet Bey","05323851082","",2,"","","","",195],[199,"Mehmet Ertekin Mys","05357661930","",2,"","","","",196],[200,"Mehmet Hoca","05372507115","",1,"","","","",197],[201,"Mehmet Köksal Eng","05345633733","",1,"","","","",198],[202,"Mehmet Kılıç Bakım Onarım","05327018797","",1,"","","","",199],[203,"Mehmet Mercangöz Saray Üretim Müdürü","+905443090407","",2,"","","","",200],[204,"Mehmet met","05339680880","",2,"","","","",201],[205,"Mehmet Metin Taşkın Topograf","05433574145","",2,"","","","",202],[206,"Mehmet Metin Vodofone","05414212558","",2,"","","","",203],[207,"Mehmet Sahin Mys","05339285383","",1,"","","","",204],[208,"Mehmet Yanık Belçika MYS","","",1,"","","","",205],[209,"Mehmet Yilmaz","05442053712","",3,"","","","",206],[210,"Mehmet Yıldız","+905533849775","",1,"","","","",207],[211,"Mehriban ymyo","05363914249","",1,"","","","",208],[212,"Melih Aydın Vedat Dağkıran","05522796734","",2,"","","","",209],[213,"Melih Levha Celal","05437703230","",2,"","","","",210],[214,"Mert ALTIN Kalite","+905331356780","",1,"","","","",211],[215,"Mert Kukal Satın Alma","+905545406153","",1,"","","","",212],[216,"Merve Balci Bebe","05064647303","",3,"","","","",213],[217,"Merve Yeğin Mehmet Hocanın Kızı","05397276346","",2,"","","","",214],[218,"MOİ Cafer","05337453808","",1,"","","","",215],[219,"Mu Metin Yüklemeci","05432038235","",1,"","","","",216],[220,"Muammer Uysal Afyon","05467768800","",1,"","","","",217],[221,"Muhammet Güven Son","+905078322533","",2,"","","","",218],[222,"Murat açikgöz","05335904045","",1,"","","","",219],[223,"Murat Bayrak Topograf","05334686985","",2,"","","","",220],[224,"Murat Enes Köksal","+905435618191","",2,"","","","",221],[225,"Murat Güneri Satın Alma","05545651446","",3,"","","","",222],[226,"Murat Çelik","05382846685","",2,"","","","",223],[227,"Murat ünal","05447499939","",2,"","","","",224],[228,"Mus Şehriban Çılga","+905331604397","",1,"","","","",225],[229,"Musa safi","05355466893","",1,"","","","",226],[230,"Mustafa Aydın Mys İsg","05368446519","",3,"","","","",227],[231,"Mustafa Bal CTI","+905368555242","",1,"","","","",228],[232,"Mustafa Boyaci","05386491528","",1,"","","","",229],[233,"Mustafa Görükoğlu Harun Birk Yeğeni","","",3,"","","","",230],[234,"Mustafa Kalite Mys","05493405361","",1,"","","","",231],[235,"Mustafa Sevim Mys","","",1,"","","","",232],[236,"Mustafa Sönmez Siegenia-Aubi Afyonlu","05324405297","05323213938",1,"","","","",233],[237,"Mustafa Yıldız Cam Bölümü","05324201174","05548804365",2,"","","","",234],[238,"My Ahmet Yücelen","+905436809956","",3,"","","","",235],[239,"My Ali Çelikkol","+905327996954","",1,"","","","",236],[240,"My ARGE Sebile Gülşen","05545879680","",1,"","","","",237],[241,"My Barış Can Depo","05389683346","",2,"","","","",238],[242,"My Bircan Sağlık","+905367405433","",3,"","","","",239],[243,"My Celal Levha","+905459759040","",2,"","","","",240],[244,"My Cüneyt Ersoy Camcı","05309370206","",2,"","","","",241],[245,"My Dursun Adem","05334229083","",2,"","","","",242],[246,"My Emre","+905375169006","",2,"","","","",243],[247,"My Eyüp Demirçi","+905545651447","",2,"","","","",244],[248,"My Gökay Özer","05305238273","",2,"","","","",245],[249,"My Göktan Operatör","05452202093","",2,"","","","",246],[250,"My Gürkay Muhasebe","05343375074","",2,"","","","",247],[251,"My Halil Bilgiç","+905365097875","",2,"","","","",248],[252,"My Hasan Demirçi","05385954231","",1,"","","","",249],[253,"My İNANÇ GÜNDOĞDU","","",2,"","","","",250],[254,"My İsa Demir Depocu","05313813209","",2,"","","","",251],[255,"My Kadir Doğan Depo","+905356520381","",2,"","","","",252],[256,"My Kadri Satın Alma","05375601559","",2,"","","","",253],[257,"My Kemal Teke","+905342437234","",3,"","","","",254],[258,"MY Kübra TINGIR","+905467876851","",2,"","","","",255],[259,"My Mehmet Metin Taşkın","+994513444840","",1,"","","","",256],[260,"My Melih Gencaver","+905314312959","",2,"","","","",257],[261,"My Muhammet Moritanyalı","05467671020","",1,"","","","",258],[262,"My Nur Genç Satınalma","05534569056","",2,"","","","",259],[263,"My Okan Bakım Onarım","+905369896935","",2,"","","","",260],[264,"My Onurcan Erdoğu Katilte","05557032057","",2,"","","","",261],[265,"My Selçuk Kaya","+905377753228","",2,"","","","",262],[266,"My Serkan Elzurna","05324178280","",3,"","","","",263],[267,"My Tolga Kalite","+905075924223","",3,"","","","",264],[268,"My Tolga Taşkın","05066754855","",2,"","","","",265],[269,"My Tugce Sınır","+905394774406","",2,"","","","",266],[270,"My Uğur Yaser CNC","05355908500","",2,"","","","",267],[271,"My Yasin Demirel","+905358251363","",2,"","","","",268],[272,"My Çağlayan Kalıştu Kalıştu CNC","+905459559294","",2,"","","","",269],[273,"My Özcan Çakal","05422753604","",2,"22.07.2026","Vazgeçti","","",270],[274,"My Şakir Yalcın","+905372554004","",1,"","","","",271],[275,"MYEC Erkan Yılmaz","05445108075","",4,"","","","",272],[276,"Myec Gökhan Apaydın","05538800655","",2,"","","","",273],[277,"MYEC Hakan Hilmioğlu","+905339640732","",2,"","","","",274],[278,"MYEC Mohammad Elias HOSSIN","","",1,"","","","",275],[279,"MYEC Çağlar Topçu","05414866887","",2,"","","","",276],[280,"MYEC-Samet Özdem","","",1,"","","","",277],[281,"MYENG Abdulbaki Bakır","","",1,"","","","",278],[282,"MYENG Alper Güzeliş","","",2,"","","","",279],[283,"MYENG Kemal Gürsoy","+447709761134","",2,"","","","",280],[284,"MYENG Osman Fırtına","05071235347","",1,"","","","",281],[285,"Mys Ali Usta","05356749051","",2,"","","","",282],[286,"Mys Aysun İpekli Tuzla Planlama","+905376592954","",2,"","","","",283],[287,"Mys Emre Levha Cnc","05436343498","",1,"","","","",284],[288,"Mys Erkan Yaman Çakıl Fabrika","+905325200918","",2,"","","","",285],[289,"Mys Mehmet Gezek","05413498285","",1,"","","","",286],[290,"Mys Muhammet","05352308653","",1,"","","","",287],[291,"Mys Orhan Bahar","+905334097652","05545406156",1,"","","","",288],[292,"Mys Orhan Celik","05377881417","",1,"","","","",289],[293,"Mys Ramazan Yasin Demirel","+905455934400","",2,"","","","",290],[294,"Mys Recep Gozukara","05362178089","",1,"","","","",291],[295,"Mys Taylan Yemekçi","+905302666814","",1,"","","","",292],[296,"Mys Turgay Montajci","05394559603","",1,"","","","",293],[297,"Mys Veysel","05417392769","",1,"","","","",294],[298,"Mys Yeşim Akgül","+905326530754","",1,"","","","",295],[301,"Mümin Cakmak","05336463403","05545727119",3,"","","","",296],[302,"Natik Yesin Tr","+905497609265","",1,"","","","",297],[303,"Nazim Cihan Eroglu","+905320605141","",3,"28.07.2026","Araştırıyor.","","",298],[304,"Nazmi Eng","+905444766052","",2,"","","","",299],[305,"Necati Cabir İnox Cnc","05336079266","",2,"","","","",300],[306,"Necmi Yalcin Korkuluk Ekibi","05347703534","",3,"","","","",301],[307,"Nesrin Yaren Ödemiş MYS Üretim Proje","+905355714786","",1,"","","","",302],[308,"Nezir Eng","+905422265497","",1,"","","","",303],[309,"Okan Muhasebe","05332255470","",2,"","","","",304],[310,"Okan Mys Levha","","",2,"","","","",305],[311,"Oktay Bingöl","05422658090","",4,"","","","",306],[312,"Oktay Kirli Mys","05337676142","",2,"","","","",307],[313,"Oktay Usta Mys","05326384733","",3,"28.07.2026","Araştırıyor.","","",308],[314,"Onur Alyans","+905384021140","",3,"","","","",309],[315,"Osman Akdogan Usta","05307002711","",3,"","","","",310],[316,"Osman Ozaydin","05432522006","",1,"","","","",311],[317,"Osman Özcan Fabrika","05417402685","",1,"","","","",312],[318,"OSMAN ÖZCAN İga","+905386678136","",2,"","","","",313],[319,"Ozan Sahinkaya Tr Mys","05452562882","",2,"","","","",314],[320,"Ozgur Arin","+905056968050","",1,"","","","",315],[321,"Oğuz Kaan Yazıcı","05325829891","",2,"","","","",316],[322,"Oğuz Muhasebe","+905352280580","",1,"","","","",317],[323,"Oğuzhan Milewakii","05305254038","",2,"","","","",318],[324,"Oğuzhan Sosay","05386125872","",2,"","","","",319],[325,"Rafet İnox","05412633362","",2,"","","","",320],[326,"Ramazan Mys Üretim","05544105947","",2,"","","","",321],[327,"Rana Kabalak","05544789865","",3,"","","","",322],[328,"Recep depocu","05362547878","",2,"","","","",323],[329,"Resat Soylu Mys","05394853381","",2,"","","","",324],[330,"Sadiye Büyük","05398601897","",2,"","","","",325],[331,"Safiye Bunarcı","05379505533","",2,"","","","",326],[332,"Safiye Findik","05056154445","",1,"","","","",327],[333,"Sait","+905325216162","",1,"","","","",328],[334,"Sar. Onur Çifteler Mekanik","+905466948526","",1,"","","","",329],[335,"Sebahattin Mys","05363075557","",2,"","","","",330],[336,"Sedat Akgul Platform Sanayi","05337230508","",1,"","","","",331],[337,"Sedat Dağkıran Alusan","05435898227","",1,"","","","",332],[338,"Sedat Dağkıran Artı1","+905533595910","",1,"","","","",333],[339,"Selam Akbulut 2025 Tr","+905465121170","",2,"","","","",334],[340,"Selim Desen Boya","05339298319","",1,"","","","",335],[341,"Selim Evk Oparetor","05337089734","",2,"","","","",336],[342,"Selman İsg B Sınıfı Akbulut","05445667557","+491634467790",2,"","","","",337],[343,"Selman Özdemir Eng Metal Yapı","+905335108142","",3,"","","","",338],[344,"Semih Atlı","","",2,"","","","",339],[345,"Semih Varoğlu Eng Proje Kordinatörü","+905336430148","",1,"","","","",340],[346,"Serap Tepetan","+905359240707","",3,"","","","",341],[347,"Serdar Hepguler","05336291796","",2,"","","","",342],[348,"Serdar Tunçbiz","05326820531","",2,"","","","",343],[349,"Seref Ulukirli Mys","05545406187","",3,"","","","",344],[350,"Serhat YILDIZ Eng","+905375710052","",3,"","","","",345],[351,"Serhat Çelik Çin","+905530323211","",1,"","","","",346],[352,"Servet Dagli Mys","05533091760","",1,"","","","",347],[353,"Servet Dağlı Metal Yapı","+905427348542","",1,"","","","",348],[354,"Sezen Çavuş Üretim Proje","+905332050750","",2,"","","","",349],[355,"Sinan Alusan","05418878318","05366420418",2,"","","","",350],[356,"Sinan Ergüner","","",1,"","","","",351],[357,"Sinan FTI","05325919002","",2,"","","","",352],[358,"Sinan İdari İşler Mys","05545393736","",1,"","","","",353],[359,"Sinan Çavuş Eng Metal Yapı","+905545393741","",1,"","","","",354],[360,"Sinem Yılmaz","+905437944349","",4,"","","","",355],[361,"Soner Metal Yapı İngiltere","+905304931085","",3,"","","","",356],[362,"Sunay Seydioglu","+905363061586","",3,"","","","",357],[363,"Süleyman Kahyaoğlu Nakliyeçi","","",2,"","","","",358],[364,"Süleyman Yücalp","05071530906","",2,"","","","",359],[365,"Taha Ata Sultangazi Belediyesi","05374023715","",3,"","","","",360],[366,"Tayfun Levha Büküm Mys","05359784830","",2,"","","","",361],[367,"Tayfun Mys Lazer Levha","+905369852497","",2,"","","","",362],[368,"Tayfun Serbest Bölge","05358224942","",1,"","","","",363],[369,"Taşeron Ali Güler","05393491939","",3,"","","","",364],[370,"Tugba Özgül","+905380523574","+905511098075",2,"","","","",365],[371,"tulay okcu","05336835968","",2,"","","","",366],[372,"Turgay Kaya","05462307585","",2,"","","","",367],[373,"Turgut Arslan Romanya","+40727277546","",2,"","","","",368],[374,"Turgut Arslan Tr","+905333755207","",2,"","","","",369],[375,"Turgut Keklik","05348957094","",3,"","","","",370],[376,"Umut Altunay","+905333723221","",3,"","","","",371],[377,"Umut Arba Bursa Genel Müdür","05333553299","",1,"","","","",372],[378,"Uğur Arba","05300679933","",1,"","","","",373],[379,"Uğur Ekşi","+905393313419","",1,"","","","",374],[380,"UğurTan Akkuzu Acarlar","05337307097","",3,"","","","",375],[381,"Vadim Adf","+77779338483","",3,"","","","",376],[382,"Vadim Tr Adf","05317245492","",3,"","","","",377],[383,"Vedat DAĞKIRAN","+905444797938","",3,"","","","",378],[384,"Veli Yaman","05545393732","",2,"","","","",379],[385,"Volga Yılmaz ENG","05526773990","",2,"","","","",380],[386,"Yakup Ayhanoglu","05523458433","",2,"","","","",381],[387,"Yalçın Tunç","+905427808948","",2,"","","","",382],[388,"Yasin Demirel Mys","","",2,"","","","",383],[389,"Yilmaz Yanik Metal Yapi","05356893729","",2,"","","","",384],[390,"Yiğit Mys Fabrika Levha","+905350174464","",2,"22.07.2026","Vazgeçti","","",385],[391,"YMYO Gülizar Arduç","05350229915","",3,"","","","",386],[392,"Yunus Güven","05073309803","",3,"","","","",387],[393,"Yunus Satın Alma","+905377810641","",1,"","","","",388],[394,"Yusuf Karacil","05065781971","",2,"","","","",389],[395,"Yusuf Uzuntaş","+905458606158","",1,"","","","",390],[396,"Yusuf Yeğin Elektrikçi","05356587402","",2,"","","","",391],[397,"Ömer F. ÖZGÜR ENG","+905393210414","",2,"","","","",392],[398,"Ömer Faruk Tümosan","05056633234","",2,"","","","",393],[399,"Önder Türk","05539393663","",3,"","","","",394],[400,"Öner Arslan Ftı","05362197337","",1,"","","","",395],[401,"Özcan Eng Şöför","05358657467","",1,"","","","",396],[402,"Özcan Üretim Mys","05323458429","",2,"","","","",397],[403,"Özer Aydın İga","05498043979","05334003680",2,"","","","",398],[404,"Özgür Ünlü","05316106006","",2,"","","","",399],[405,"Ümit Kirmit Bey","","",3,"","","","",400],[406,"Ünal Çerit Mys","05445553587","",3,"","","","",401],[407,"Şahin Gülen Mys","05327135965","",3,"28.07.2026","Araştırıyor.","","",402],[408,"Şehriban Çılga Mys","05382307558","",1,"","","","",403],[409,"🇹🇷EROL UÇAR🇦🇿 Cnc","+905418250346","",3,"","","","",404]];
 // [sira, adSoyad, tel1, tel2, puan, tarih, durum, tarih2, durum2, id, notlar]
 
@@ -3377,12 +3555,14 @@ function saveEntry(){
     document.getElementById('f-notlar').value.trim(),
     document.getElementById('f-hatirlatma-tarih').value,
     document.getElementById('f-hatirlatma-not').value.trim(),
-    document.getElementById('f-hatirlatma-saat').value
+    document.getElementById('f-hatirlatma-saat').value,
+    undefined // 14: Google Takvim etkinlik id'si (aşağıda korunur/doldurulur)
   ];
   if(editId!==null){
     const idx = DATA.findIndex(x=>x[9]===editId);
     row[0] = DATA[idx][0];
     row[9] = editId;
+    row[14] = DATA[idx][14];
     DATA[idx] = row;
   } else {
     row[0] = nextSira();
@@ -3395,6 +3575,7 @@ function saveEntry(){
   switchTab('list');
   goPage(1);
   render();
+  syncRowToGoogleCalendarIfNeeded(row);
 }
 
 function askDelete(id){
@@ -3406,6 +3587,8 @@ function closeConfirm(){
   document.getElementById('confirm-modal').style.display='none';
 }
 function confirmDelete(){
+  const row = DATA.find(x=>x[9]===deleteId);
+  if(row && row[14]) deleteGoogleCalendarEvent(row[14]);
   DATA = DATA.filter(x=>x[9]!==deleteId);
   persist();
   closeConfirm();
@@ -3431,6 +3614,9 @@ function checkResetInput(){
 }
 function confirmResetAll(){
   if(!isSilConfirmed()) return;
+  if(gcalConnected){
+    DATA.filter(r=>r[14]).forEach(r=>deleteGoogleCalendarEvent(r[14]));
+  }
   DATA = [];
   persist();
   closeResetModal();
